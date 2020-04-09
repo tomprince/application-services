@@ -12,7 +12,7 @@ use interrupt::NeverInterrupts;
 use rusqlite::{Connection, Row};
 use serde_json::json;
 use sql_support::ConnExt;
-use sync15::ServerTimestamp;
+use sync15_traits::ServerTimestamp;
 use sync_guid::Guid;
 
 // Here we try and simulate everything done by a "full sync", just minus the

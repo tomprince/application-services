@@ -10,7 +10,7 @@ mod sync_tests;
 
 use serde_derive::*;
 use serde_json;
-use sync15::ServerTimestamp;
+use sync15_traits::ServerTimestamp;
 use sync_guid::Guid as SyncGuid;
 
 use incoming::IncomingAction;
