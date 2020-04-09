@@ -38,34 +38,71 @@ fn get_from_db(conn: &Connection, ext_id: &str) -> Result<Option<JsonMap>> {
 }
 
 fn save_to_db(conn: &Connection, ext_id: &str, val: &JsonValue) -> Result<()> {
-    // Convert to bytes so we can enforce the quota.
-    let sval = val.to_string();
-    if sval.as_bytes().len() > QUOTA_BYTES {
-        return Err(ErrorKind::QuotaError(QuotaReason::TotalBytes).into());
+    // This function also handles removals. Either an empty map or explicit null
+    // is a removal. If there's a mirror record for this extension ID, then we
+    // must leave a tombstone behind for syncing.
+    let is_delete = match val {
+        JsonValue::Null => true,
+        JsonValue::Object(m) => m.is_empty(),
+        _ => false,
+    };
+    if is_delete {
+        let in_mirror = conn.query_row_and_then_named(
+            "SELECT EXISTS(SELECT 1 FROM moz_extension_data_mirror WHERE ext_id = :ext_id);",
+            rusqlite::named_params! {
+                ":ext_id": ext_id,
+            },
+            |row| row.get::<_, bool>(0),
+            true,
+        )?;
+        if in_mirror {
+            log::trace!("saving data for '{}': leaving a tombstone", ext_id);
+            conn.execute_named_cached(
+                "
+                INSERT INTO moz_extension_data(ext_id, data, sync_change_counter)
+                VALUES (:ext_id, NULL, 1)
+                ON CONFLICT (ext_id) DO UPDATE
+                SET data = NULL, sync_change_counter = sync_change_counter + 1",
+                rusqlite::named_params! {
+                    ":ext_id": ext_id,
+                },
+            )?;
+        } else {
+            log::trace!("saving data for '{}': removing the row", ext_id);
+            conn.execute_named_cached(
+                "
+                DELETE FROM moz_extension_data WHERE ext_id = :ext_id",
+                rusqlite::named_params! {
+                    ":ext_id": ext_id,
+                },
+            )?;
+        }
+    } else {
+        // Convert to bytes so we can enforce the quota.
+        let sval = val.to_string();
+        if sval.as_bytes().len() > QUOTA_BYTES {
+            return Err(ErrorKind::QuotaError(QuotaReason::TotalBytes).into());
+        }
+        // XXX - as_bytes() above and using sval below means 2 utf-8 encodes.
+        // Ideally we could work out how to convert to bytes once and use it in both
+        // places.
+        log::trace!("saving data for '{}': writing", ext_id);
+        conn.execute_named_cached(
+            "INSERT INTO moz_extension_data(ext_id, data, sync_change_counter)
+                VALUES (:ext_id, :data, 1)
+                ON CONFLICT (ext_id) DO UPDATE
+                set data=:data, sync_change_counter = sync_change_counter + 1",
+            rusqlite::named_params! {
+                ":ext_id": ext_id,
+                ":data": &sval,
+            },
+        )?;
     }
-    // XXX - as_bytes() above and using sval below means 2 utf-8 encodes.
-    // Ideally we could work out how to convert to bytes once and use it in both
-    // places.
-    conn.execute_named(
-        "INSERT OR REPLACE INTO moz_extension_data(ext_id, data, sync_change_counter)
-            VALUES (:ext_id, :data,
-                    IFNULL((SELECT sync_change_counter FROM moz_extension_data WHERE ext_id = :ext_id), 0) + 1)",
-        &[(":ext_id", &ext_id),
-          (":data", &sval),
-          (":data", &sval),
-          ],
-    )?;
     Ok(())
 }
 
 fn remove_from_db(conn: &Connection, ext_id: &str) -> Result<()> {
-    // XXX - sync support will need to do the tombstone thing here.
-    conn.execute_named(
-        "DELETE FROM moz_extension_data
-        WHERE ext_id = :ext_id",
-        &[(":ext_id", &ext_id)],
-    )?;
-    Ok(())
+    save_to_db(conn, ext_id, &JsonValue::Null)
 }
 
 // This is a "helper struct" for the callback part of the chrome.storage spec,
@@ -248,7 +285,6 @@ pub fn remove(conn: &Connection, ext_id: &str, keys: JsonValue) -> Result<Storag
 /// StorageChanges defined by the chrome API - it's assumed the caller will
 /// arrange to deliver this to observers as defined in that API.
 pub fn clear(conn: &Connection, ext_id: &str) -> Result<StorageChanges> {
-    // XXX - transaction?
     let existing = match get_from_db(conn, ext_id)? {
         None => return Ok(StorageChanges::new()),
         Some(v) => v,

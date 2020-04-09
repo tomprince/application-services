@@ -108,17 +108,18 @@ pub fn record_uploaded<S: ?Sized + Interruptee>(
         )?;
     }
 
-    // Copy staging into the mirror, then kill staging.
+    // Copy staging into the mirror, then kill staging, and local tombstones.
     conn.execute_batch(
         "
-    REPLACE INTO moz_extension_data_mirror (guid, ext_id, server_modified, data)
-    SELECT guid, ext_id, server_modified, data FROM temp.moz_extension_data_staging;
+        REPLACE INTO moz_extension_data_mirror (guid, ext_id, server_modified, data)
+        SELECT guid, ext_id, server_modified, data FROM temp.moz_extension_data_staging;
 
-    DELETE FROM temp.moz_extension_data_staging;
-    ",
+        DELETE FROM temp.moz_extension_data_staging;
+
+        DELETE from moz_extension_data WHERE data IS NULL;",
     )?;
 
-    // And the stuff that was uploaded should be places in the mirror.
+    // And the stuff that was uploaded should be placed in the mirror.
     // XXX - server_modified is wrong here - do we even need it in the schema?
     let sql = "
         REPLACE INTO moz_extension_data_mirror (guid, ext_id, server_modified, data)

@@ -302,9 +302,8 @@ mod tests {
 
     // select simple int
     fn ssi(conn: &Connection, stmt: &str) -> u32 {
-        let count: Result<Option<u32>> =
-            conn.try_query_row(stmt, &[], |row| Ok(row.get::<_, u32>(0)?), false);
-        count.unwrap().unwrap()
+        conn.query_row_and_then(stmt, rusqlite::NO_PARAMS, |row| row.get::<_, u32>(0))
+            .expect("must work")
     }
 
     fn array_to_incoming(mut array: Value) -> Vec<ServerPayload> {

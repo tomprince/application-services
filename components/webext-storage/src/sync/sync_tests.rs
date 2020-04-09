@@ -40,13 +40,12 @@ fn check_finished_with(conn: &Connection, ext_id: &str, val: serde_json::Value) 
     let mirror = get_mirror_data(conn, ext_id);
     assert_eq!(mirror, DbData::Data(val.to_string()));
     // and there should be zero items with a change counter.
-    let count: Result<Option<u32>> = conn.try_query_row(
+    let count = conn.query_row_and_then(
         "SELECT COUNT(*) FROM moz_extension_data WHERE sync_change_counter != 0;",
-        &[],
-        |row| Ok(row.get::<_, u32>(0)?),
-        false,
-    );
-    assert_eq!(count.unwrap(), Some(0));
+        rusqlite::NO_PARAMS,
+        |row| row.get::<_, u32>(0),
+    )?;
+    assert_eq!(count, 0);
     Ok(())
 }
 
@@ -77,7 +76,7 @@ fn _get(conn: &Connection, expected_extid: &str, table: &str) -> DbData {
         .conn()
         .query_rows_and_then_named(&sql, &[], from_row)
         .expect("should work");
-    if items.len() == 0 {
+    if items.is_empty() {
         DbData::NoRow
     } else {
         let item = items.pop().expect("it exists");
@@ -125,7 +124,7 @@ fn test_simple_tombstone() -> Result<()> {
     clear(&conn, "ext-id")?;
     assert_eq!(get_local_data(&conn, "ext-id"), DbData::NoRow);
     // now set data again and sync and *then* remove.
-    set(&conn, "ext-id", data.clone())?;
+    set(&conn, "ext-id", data)?;
     assert_eq!(do_sync(&conn, vec![])?.len(), 1);
     assert!(get_local_data(&conn, "ext-id").has_data());
     assert!(get_mirror_data(&conn, "ext-id").has_data());
