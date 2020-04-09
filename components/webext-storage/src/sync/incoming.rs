@@ -149,8 +149,6 @@ pub enum IncomingAction {
     //Invalid { reason: String },
     /// We should locally delete the data for this record
     DeleteLocally,
-    /// We should remotely delete the data for this record
-    DeleteRemotely,
     /// We will take the remote.
     TakeRemote { data: JsonMap },
     /// We merged this data - this is what we came up with.
@@ -256,15 +254,6 @@ pub fn apply_actions<S: ?Sized + Interruptee>(
                     &[(":ext_id", &item.ext_id)],
                 )?;
             }
-            // We should remotely delete the data for this record.
-            IncomingAction::DeleteRemotely => {
-                // The local record is probably already in this state, but let's
-                // be sure.
-                cext.execute_named_cached(
-                    "UPDATE moz_extension_data SET data = NULL WHERE ext_id = :ext_id",
-                    &[(":ext_id", &item.ext_id)],
-                )?;
-            }
             // We want to update the local record with 'data' and after this update the item no longer is considered dirty.
             IncomingAction::TakeRemote { data } => {
                 cext.execute_named_cached(
@@ -279,11 +268,6 @@ pub fn apply_actions<S: ?Sized + Interruptee>(
             // We merged this data, so need to update locally but still consider
             // it dirty because the merged data must be uploaded.
             IncomingAction::Merge { data } => {
-                println!(
-                    "DATA is {:?}, {:?}",
-                    data,
-                    serde_json::Value::Object(data.clone()).to_string()
-                );
                 cext.execute_named_cached(
                     "UPDATE moz_extension_data SET data = :data, sync_change_counter = sync_change_counter + 1 WHERE ext_id = :ext_id",
                     &[
@@ -293,9 +277,14 @@ pub fn apply_actions<S: ?Sized + Interruptee>(
                 )?;
             }
 
-            // Both local and remote ended up the same - nothing to do.
-            // XXX - should probably drop the change counter to 0, right?
-            IncomingAction::Same => {}
+            // Both local and remote ended up the same - only need to nuke the
+            // change counter.
+            IncomingAction::Same => {
+                cext.execute_named_cached(
+                    "UPDATE moz_extension_data SET sync_change_counter = 0 WHERE ext_id = :ext_id",
+                    &[(":ext_id", &item.ext_id)],
+                )?;
+            }
         }
     }
     tx.commit()?;

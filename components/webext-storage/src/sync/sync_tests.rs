@@ -2,11 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use crate::api::set;
+use crate::api::{clear, get, set};
 use crate::db::test::new_mem_db;
 use crate::error::*;
 use crate::sync::incoming::{apply_actions, get_incoming, plan_incoming, stage_incoming};
-use crate::sync::outgoing::{get_outgoing, record_uploaded};
+use crate::sync::outgoing::{get_outgoing, record_uploaded, OutgoingInfo};
 use crate::sync::ServerPayload;
 use crate::ServerTimestamp;
 use interrupt::NeverInterrupts;
@@ -16,8 +16,8 @@ use sql_support::ConnExt;
 use sync_guid::Guid;
 
 // Here we try and simulate everything done by a "full sync", just minus the
-// engine.
-fn do_sync(conn: &Connection, incoming_bsos: Vec<ServerPayload>) -> Result<()> {
+// engine. Returns the records we uploaded.
+fn do_sync(conn: &Connection, incoming_bsos: Vec<ServerPayload>) -> Result<Vec<OutgoingInfo>> {
     // First we stage the incoming in the temp tables.
     stage_incoming(conn, incoming_bsos, &NeverInterrupts)?;
     // Then we process them getting a Vec of (item, state), which we turn into
@@ -30,20 +30,71 @@ fn do_sync(conn: &Connection, incoming_bsos: Vec<ServerPayload>) -> Result<()> {
     // So we've done incoming - do outgoing.
     let outgoing = get_outgoing(conn, &NeverInterrupts)?;
     record_uploaded(conn, &outgoing, &NeverInterrupts)?;
+    Ok(outgoing)
+}
+
+// Check *both* the mirror and local API have ended up with the specified data.
+fn check_finished_with(conn: &Connection, ext_id: &str, val: serde_json::Value) -> Result<()> {
+    let local = get(conn, &ext_id, serde_json::Value::Null)?;
+    assert_eq!(local, val);
+    let mirror = get_mirror_data(conn, ext_id);
+    assert_eq!(mirror, DbData::Data(val.to_string()));
+    // and there should be zero items with a change counter.
+    let count: Result<Option<u32>> = conn.try_query_row(
+        "SELECT COUNT(*) FROM moz_extension_data WHERE sync_change_counter != 0;",
+        &[],
+        |row| Ok(row.get::<_, u32>(0)?),
+        false,
+    );
+    assert_eq!(count.unwrap(), Some(0));
     Ok(())
 }
 
-fn get_mirror_data(conn: &Connection, expected_extid: &str) -> Result<Option<String>> {
-    let sql = "SELECT ext_id, data FROM moz_extension_data_mirror";
+#[derive(Debug, PartialEq)]
+enum DbData {
+    NoRow,
+    NullRow,
+    Data(String),
+}
+
+impl DbData {
+    fn has_data(&self) -> bool {
+        if let DbData::Data(_) = self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn _get(conn: &Connection, expected_extid: &str, table: &str) -> DbData {
+    let sql = format!("SELECT ext_id, data FROM {}", table);
 
     fn from_row(row: &Row<'_>) -> Result<(String, Option<String>)> {
         Ok((row.get("ext_id")?, row.get("data")?))
     }
-    let mut items = conn.conn().query_rows_and_then_named(sql, &[], from_row)?;
-    assert_eq!(items.len(), 1);
-    let item = items.pop().expect("it exists");
-    assert_eq!(item.0, expected_extid);
-    Ok(item.1)
+    let mut items = conn
+        .conn()
+        .query_rows_and_then_named(&sql, &[], from_row)
+        .expect("should work");
+    if items.len() == 0 {
+        DbData::NoRow
+    } else {
+        let item = items.pop().expect("it exists");
+        assert_eq!(item.0, expected_extid);
+        match item.1 {
+            None => DbData::NullRow,
+            Some(v) => DbData::Data(v),
+        }
+    }
+}
+
+fn get_mirror_data(conn: &Connection, expected_extid: &str) -> DbData {
+    _get(conn, expected_extid, "moz_extension_data_mirror")
+}
+
+fn get_local_data(conn: &Connection, expected_extid: &str) -> DbData {
+    _get(conn, expected_extid, "moz_extension_data")
 }
 
 #[test]
@@ -52,11 +103,82 @@ fn test_simple_outgoing_sync() -> Result<()> {
     let db = new_mem_db();
     let conn = db.writer.lock().unwrap();
     let data = json!({"key1": "key1-value", "key2": "key2-value"});
-    let expected = data.to_string();
+    set(&conn, "ext-id", data.clone())?;
+    assert_eq!(do_sync(&conn, vec![])?.len(), 1);
+    check_finished_with(&conn, "ext-id", data)?;
+    Ok(())
+}
+
+#[test]
+fn test_simple_tombstone() -> Result<()> {
+    // Tombstones are only kept when the mirror has that record - so first
+    // test that, then arrange for the mirror to have the record.
+    let db = new_mem_db();
+    let conn = db.writer.lock().unwrap();
+    let data = json!({"key1": "key1-value", "key2": "key2-value"});
+    set(&conn, "ext-id", data.clone())?;
+    assert_eq!(
+        get_local_data(&conn, "ext-id"),
+        DbData::Data(data.to_string())
+    );
+    // hasn't synced yet, so clearing shouldn't write a tombstone.
+    clear(&conn, "ext-id")?;
+    assert_eq!(get_local_data(&conn, "ext-id"), DbData::NoRow);
+    // now set data again and sync and *then* remove.
+    set(&conn, "ext-id", data.clone())?;
+    assert_eq!(do_sync(&conn, vec![])?.len(), 1);
+    assert!(get_local_data(&conn, "ext-id").has_data());
+    assert!(get_mirror_data(&conn, "ext-id").has_data());
+    clear(&conn, "ext-id")?;
+    assert_eq!(get_local_data(&conn, "ext-id"), DbData::NullRow);
+    // then after syncing, the tombstone will be in the mirror but the local row
+    // has been removed.
+    assert_eq!(do_sync(&conn, vec![])?.len(), 1);
+    assert_eq!(get_local_data(&conn, "ext-id"), DbData::NoRow);
+    assert_eq!(get_mirror_data(&conn, "ext-id"), DbData::NullRow);
+    Ok(())
+}
+
+#[test]
+fn test_merged() -> Result<()> {
+    let db = new_mem_db();
+    let conn = db.writer.lock().unwrap();
+    let data = json!({"key1": "key1-value"});
     set(&conn, "ext-id", data)?;
-    do_sync(&conn, vec![])?;
-    let data = get_mirror_data(&conn, "ext-id")?;
-    assert_eq!(data, Some(expected));
+    // Incoming payload without 'key1' and conflicting for 'key2'
+    let payload = ServerPayload {
+        guid: Guid::from("guid"),
+        ext_id: "ext-id".to_string(),
+        data: Some(json!({"key2": "key2-value"}).to_string()),
+        deleted: false,
+        last_modified: ServerTimestamp(0),
+    };
+    assert_eq!(do_sync(&conn, vec![payload])?.len(), 1);
+    check_finished_with(
+        &conn,
+        "ext-id",
+        json!({"key1": "key1-value", "key2": "key2-value"}),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn test_reconciled() -> Result<()> {
+    let db = new_mem_db();
+    let conn = db.writer.lock().unwrap();
+    let data = json!({"key1": "key1-value"});
+    set(&conn, "ext-id", data)?;
+    // Incoming payload without 'key1' and conflicting for 'key2'
+    let payload = ServerPayload {
+        guid: Guid::from("guid"),
+        ext_id: "ext-id".to_string(),
+        data: Some(json!({"key1": "key1-value"}).to_string()),
+        deleted: false,
+        last_modified: ServerTimestamp(0),
+    };
+    // Should be no outgoing records as we reconciled.
+    assert_eq!(do_sync(&conn, vec![payload])?.len(), 0);
+    check_finished_with(&conn, "ext-id", json!({"key1": "key1-value"}))?;
     Ok(())
 }
 
@@ -74,9 +196,14 @@ fn test_conflicting_incoming() -> Result<()> {
         deleted: false,
         last_modified: ServerTimestamp(0),
     };
-    do_sync(&conn, vec![payload])?;
-    let data = get_mirror_data(&conn, "ext-id")?;
-    let expected = json!({"key1": "key1-value", "key2": "key2-incoming"});
-    assert_eq!(data, Some(expected.to_string()));
+    assert_eq!(do_sync(&conn, vec![payload])?.len(), 1);
+    check_finished_with(
+        &conn,
+        "ext-id",
+        json!({"key1": "key1-value", "key2": "key2-incoming"}),
+    )?;
     Ok(())
 }
+
+// There are lots more we could add here, particularly around the resolution of
+// deletion of keys and deletions of the entire value.
