@@ -57,7 +57,7 @@ impl OutgoingInfo {
     }
 }
 
-/// Gets into about what should be uploaded. Returns a vec of the payload which
+/// Gets info about what should be uploaded. Returns a vec of the payload which
 // should be uploaded, plus the state for those items which should be held
 // until the upload is complete, then passed back to record_uploaded.
 pub fn get_outgoing<S: ?Sized + Interruptee>(

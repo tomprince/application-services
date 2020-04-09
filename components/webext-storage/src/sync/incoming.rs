@@ -80,7 +80,7 @@ pub enum IncomingState {
     IncomingOnly {
         incoming: Option<JsonMap>,
     },
-    LocalOnly {
+    HasLocal {
         incoming: Option<JsonMap>,
         local: Option<JsonMap>,
     },
@@ -120,7 +120,7 @@ pub fn get_incoming(conn: &Connection) -> Result<Vec<(IncomingItem, IncomingStat
 
         let state = match (local_exists, mirror_exists) {
             (false, false) => IncomingState::IncomingOnly { incoming },
-            (true, false) => IncomingState::LocalOnly {
+            (true, false) => IncomingState::HasLocal {
                 incoming,
                 local: json_map_from_row(row, "l_data")?,
             },
@@ -188,10 +188,10 @@ pub fn plan_incoming(s: IncomingState) -> IncomingAction {
                 }
             }
         }
-        IncomingState::LocalOnly { incoming, local } => {
+        IncomingState::HasLocal { incoming, local } => {
             // So we have a local record and an incoming/staging record, but *not* a
-            // mirror record. This is the first time we've seen this (ie, almost
-            // certainly another device synced something)
+            // mirror record. This means some other device has synced this for
+            // the first time and we are yet to do the same.
             match (incoming, local) {
                 (Some(id), Some(ld)) => {
                     // This means the extension exists locally and remotely
@@ -234,6 +234,7 @@ pub fn plan_incoming(s: IncomingState) -> IncomingAction {
     }
 }
 
+// Apply the actions necessary to fully process the incoming items.
 pub fn apply_actions<S: ?Sized + Interruptee>(
     conn: &Connection,
     actions: Vec<(IncomingItem, IncomingAction)>,

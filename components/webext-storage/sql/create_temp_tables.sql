@@ -13,7 +13,9 @@ CREATE TEMP TABLE moz_extension_data_staging (
     */
     ext_id TEXT NOT NULL UNIQUE,
 
-    /* Timestamp as recorded by the server */
+    /* Timestamp as recorded by the server - XXX - we don't currently use this
+       for merging, so should consider killing it?
+    */
     server_modified INTEGER NOT NULL,
     /* The JSON payload. We *do* allow NULL here - it means "deleted" */
     data TEXT

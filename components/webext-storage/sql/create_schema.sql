@@ -30,11 +30,13 @@ CREATE TABLE IF NOT EXISTS moz_extension_data_mirror (
        We may end up making this a regular foreign-key relationship back to
        moz_extension_data, although maybe not - the ext_id may not exist in
        moz_extension_data at the time we populate this table.
-       We can iterate here as we site up sync support.
+       We can iterate here as we ramp up sync support.
     */
     ext_id TEXT NOT NULL UNIQUE,
 
-    /* Timestamp as recorded by the server */
+    /* Timestamp as recorded by the server - XXX - we don't currently use this
+       for merging, so should consider killing it?
+    */
     server_modified INTEGER NOT NULL,
     /* The JSON payload. We *do* allow NULL here - it means "deleted" */
     data TEXT
