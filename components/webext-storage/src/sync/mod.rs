@@ -8,9 +8,9 @@ mod outgoing;
 #[cfg(test)]
 mod sync_tests;
 
-use crate::ServerTimestamp;
 use serde_derive::*;
 use serde_json;
+use sync15::ServerTimestamp;
 use sync_guid::Guid as SyncGuid;
 
 use incoming::IncomingAction;

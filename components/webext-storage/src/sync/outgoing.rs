@@ -5,10 +5,10 @@
 // The "outgoing" part of syncing - building the payloads to upload and
 // managing the sync state of the local DB.
 
-use crate::ServerTimestamp;
 use interrupt::Interruptee;
 use rusqlite::{Connection, Row};
 use sql_support::ConnExt;
+use sync15::ServerTimestamp;
 use sync_guid::Guid as SyncGuid;
 
 use crate::error::*;

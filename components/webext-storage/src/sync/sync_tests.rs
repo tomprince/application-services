@@ -8,11 +8,11 @@ use crate::error::*;
 use crate::sync::incoming::{apply_actions, get_incoming, plan_incoming, stage_incoming};
 use crate::sync::outgoing::{get_outgoing, record_uploaded, OutgoingInfo};
 use crate::sync::ServerPayload;
-use crate::ServerTimestamp;
 use interrupt::NeverInterrupts;
 use rusqlite::{Connection, Row};
 use serde_json::json;
 use sql_support::ConnExt;
+use sync15::ServerTimestamp;
 use sync_guid::Guid;
 
 // Here we try and simulate everything done by a "full sync", just minus the
